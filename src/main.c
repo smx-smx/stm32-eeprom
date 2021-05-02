@@ -182,6 +182,7 @@ void I2C1_EV_IRQHandler()                //Event callback (receive or send)
 
 
 static char DBG_MSG_ADDR = 'a';
+static char DBG_MSG_DATA = 'd';
 static char DBG_MSG_RX = 'r';
 static char DBG_MSG_TX = 't';
 static char DBG_MSG_LISTEN = 'l';
@@ -199,7 +200,9 @@ enum DeviceState {
 
 // globals are fun...NOT!
 
-static uint8_t ram[256];
+#define EEPROM_SIZE (32 * 1024)
+
+static uint8_t ram[EEPROM_SIZE];
 static uint16_t word_addr = 0;
 static enum DeviceState state = STATE_INITIAL;
 static uint8_t word_addr_byte = 0;
@@ -218,6 +221,7 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *I2cHandle){
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t direction, uint16_t addrMatchCode) {
   if(direction == I2C_DIRECTION_TRANSMIT) {
     // master is sending, start first receive
+    // if the master is writing, it always writes the address first
     HAL_I2C_Slave_Seq_Receive_IT(hi2c, &word_addr_byte, 1, I2C_NEXT_FRAME);
   } else {
     // master is receiving, start first transmit
@@ -228,7 +232,7 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t direction, uint16_t a
 
 
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c){
-  // we have just sent something to the master
+  // we just sent something to the master
 
   // offer the next eeprom byte (the master will NACK if it doesn't want it)
   word_addr = EEPROM_OFFSET(word_addr + 1);
@@ -237,8 +241,7 @@ void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c){
 
 
 void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c){
-  // we have just received something from the master
-  // act on it
+  // we just received something from the master
   if(state == STATE_INITIAL){ // received byte0 of addr
     // [DE] AD
     // overwrite previous word_addr
@@ -252,14 +255,10 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c){
       // DE [AD]
       word_addr |= word_addr_byte;
       state = STATE_HAVE_ADDRESS;
-
-      // we not have the address, start first data RX
-      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
-    } else {
-      // next data RX
-      word_addr = EEPROM_OFFSET(word_addr + 1);
-      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
     }
+    // next (or first) data RX
+    HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
+    word_addr = EEPROM_OFFSET(word_addr + 1);
   }
 }
 
