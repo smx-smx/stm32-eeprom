@@ -87,6 +87,22 @@ void assert_failed(uint8_t *file, uint32_t line)
 UART_HandleTypeDef UartHandle;
 I2C_HandleTypeDef I2cHandle;
 
+typedef struct logEntry {
+  uint8_t completed : 1;
+  uint8_t is_write : 1;
+  uint8_t count : 7; // (2^7)-1 max size, more than enough
+  uint16_t address
+} logEntry_t;
+
+#define LOG_MAXSIZE 32
+static logEntry_t logBuffer[LOG_MAXSIZE];
+
+static int logIndex = 0;
+static logEntry_t *lastLog = &logBuffer[0];
+
+#define LOGENTRY_NEXT_INDEX() ((logIndex + 1) & (LOG_MAXSIZE - 1))
+#define LOGENTRY_NEXT() ( &logBuffer[LOGENTRY_NEXT_INDEX()] )
+
 /**
   * @brief UART MSP Initialization
   *        This function configures the hardware resources used in this example:
@@ -212,6 +228,11 @@ static uint8_t word_addr_byte = 0;
 // end of I2C transaction (STOP)
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *I2cHandle){
   // restart
+  if(lastLog->count > 0){
+    lastLog->completed = 1;
+    lastLog = LOGENTRY_NEXT();
+  }
+
   state = STATE_INITIAL;
   HAL_I2C_EnableListen_IT(I2cHandle);
 }
@@ -226,6 +247,7 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t direction, uint16_t a
   } else {
     // master is receiving, start first transmit
     word_addr = EEPROM_OFFSET(word_addr);
+    lastLog->address = word_addr;
     HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
   }
 }
@@ -237,6 +259,9 @@ void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c){
   // offer the next eeprom byte (the master will NACK if it doesn't want it)
   word_addr = EEPROM_OFFSET(word_addr + 1);
   HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
+
+  // log data writes
+  lastLog->count++;
 }
 
 
@@ -255,18 +280,35 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c){
       // DE [AD]
       word_addr |= word_addr_byte;
       state = STATE_HAVE_ADDRESS;
+
+      lastLog->address = word_addr;
     }
-    // next (or first) data RX
+    // handle next (or first) data RX
+    lastLog->count++;
+    lastLog->is_write = 1;
     HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
     word_addr = EEPROM_OFFSET(word_addr + 1);
   }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c){
-  if( HAL_I2C_GetError(hi2c) == HAL_I2C_ERROR_AF) {
-    // the master got pissed off, so we "undo" the last transfer
-    word_addr--; // transaction terminated by master
-  } else {}
+  
+  if( HAL_I2C_GetError(hi2c) != HAL_I2C_ERROR_AF) {
+    return;
+  }
+  // if master NACK'd, the last write didn't go through
+  word_addr--; // transaction terminated by master
+  if(lastLog->count > 0){
+    lastLog->count--;
+    /**
+     * in the event of a failed RX
+     * if we have 0 bytes the transmission ended without
+     * any data being written, convert this to a read
+     **/
+    if(lastLog->count == 0){
+      lastLog->is_write = 0;
+    }
+  }
 }
 
 static void UART_Init(){
@@ -315,11 +357,21 @@ int main(void)
 
   while (1)
   {
-    HAL_Delay(400);
+    //HAL_Delay(400);
 
-    if(word_addr != 0){
-      printf("%u,%u\r\n", word_addr, word_addr_byte);
+    for(int i=0; i<LOG_MAXSIZE; i++){
+      logEntry_t *ent =  &logBuffer[i];
+      if(ent->count == 0 || !ent->completed){
+        continue;
+      }
+      printf("%c 0x%x %u\r\n", ((ent->is_write) ? 'w' : 'r'), ent->address, ent->count);
+      ent->count = 0;
+      ent->completed = 0;
     }
+
+    /*if(word_addr != 0){
+      printf("%u,%u\r\n", word_addr, word_addr_byte);
+    }*/
     #if TEST_DEMO
     BSP_LED_Toggle(LED2);
     HAL_Delay(500);
