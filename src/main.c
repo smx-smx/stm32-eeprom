@@ -167,6 +167,7 @@ static void I2C_Slave_Init() {
   
   if(HAL_I2C_Init(&I2cHandle) != HAL_OK) { Error_Handler(); }
   
+  // start first transaction
   HAL_I2C_EnableListen_IT(&I2cHandle);
 }
 
@@ -187,56 +188,85 @@ static char DBG_MSG_LISTEN = 'l';
 static char DBG_MSG_END = '.';
 #define DBG_MSG_UART(x) HAL_UART_Transmit(&UartHandle, (unsigned char *)&x, 1, -1)
 
-void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *I2cHandle){
-  // restart
-  HAL_I2C_EnableListen_IT(I2cHandle);
-}
-
 enum DeviceState {
-  STATE_INITIAL,
+  // initial state
+  STATE_INITIAL = 0,
+  // receiving the first byte of word addr
+  STATE_RECEIVING_ADDRESS,
+  // after the 2nd byte of word addr
   STATE_HAVE_ADDRESS
 };
 
-static uint8_t offset = 0;
-static uint8_t ram[256];
-static enum DeviceState state = STATE_INITIAL;
+// globals are fun...NOT!
 
+static uint8_t ram[256];
+static uint16_t word_addr = 0;
+static enum DeviceState state = STATE_INITIAL;
+static uint8_t word_addr_byte = 0;
+
+//{}
+
+// end of I2C transaction (STOP)
+void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *I2cHandle){
+  // restart
+  state = STATE_INITIAL;
+  HAL_I2C_EnableListen_IT(I2cHandle);
+}
+
+#define EEPROM_OFFSET(x) ((x) & (sizeof(ram) - 1))
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t direction, uint16_t addrMatchCode) {
   if(direction == I2C_DIRECTION_TRANSMIT) {
-    // master is sending
-    /*if( first ) {
-      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &offset, 1, I2C_NEXT_FRAME);
-    } else {*/
-      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[offset], 1, I2C_NEXT_FRAME);
-    //}
+    // master is sending, start first receive
+    HAL_I2C_Slave_Seq_Receive_IT(hi2c, &word_addr_byte, 1, I2C_NEXT_FRAME);
   } else {
-    // master is receiving
-    HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[offset], 1, I2C_NEXT_FRAME);
+    // master is receiving, start first transmit
+    word_addr = EEPROM_OFFSET(word_addr);
+    HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
   }
 }
 
 
 void HAL_I2C_SlaveTxCpltCallback(I2C_HandleTypeDef *hi2c){
-  HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[offset], 1, I2C_NEXT_FRAME);
-  offset = (offset + 1) % 256;
+  // we have just sent something to the master
+
+  // offer the next eeprom byte (the master will NACK if it doesn't want it)
+  word_addr = EEPROM_OFFSET(word_addr + 1);
+  HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
 }
 
 
 void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c){
-  #if ENABLE_WRITE
-  /*if(first) {
-    first = 0;
-  } else {*/
-    offset = (offset + 1) % 256;
-  //}
-  HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[offset], 1, I2C_NEXT_FRAME);
-  #endif
+  // we have just received something from the master
+  // act on it
+  if(state == STATE_INITIAL){ // received byte0 of addr
+    // [DE] AD
+    // overwrite previous word_addr
+    word_addr = word_addr_byte << 8;
+    state = STATE_RECEIVING_ADDRESS;
+
+    // start to receive next addr byte
+    HAL_I2C_Slave_Seq_Receive_IT(hi2c, &word_addr_byte, 1, I2C_NEXT_FRAME);
+  } else {
+    if(state == STATE_RECEIVING_ADDRESS){ // received byte1 of addr
+      // DE [AD]
+      word_addr |= word_addr_byte;
+      state = STATE_HAVE_ADDRESS;
+
+      // we not have the address, start first data RX
+      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
+    } else {
+      // next data RX
+      word_addr = EEPROM_OFFSET(word_addr + 1);
+      HAL_I2C_Slave_Seq_Receive_IT(hi2c, &ram[word_addr], 1, I2C_NEXT_FRAME);
+    }
+  }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c){
   if( HAL_I2C_GetError(hi2c) == HAL_I2C_ERROR_AF) {
-    offset--; // transaction terminated by master
+    // the master got pissed off, so we "undo" the last transfer
+    word_addr--; // transaction terminated by master
   } else {}
 }
 
@@ -274,7 +304,9 @@ int main(void)
 
   UART_Init();
   I2C_Slave_Init();
+  
   BSP_LED_Init(LED2);
+  BSP_LED_Off(LED2);
 
   printf("ready!\r\n");
 
@@ -284,6 +316,11 @@ int main(void)
 
   while (1)
   {
+    HAL_Delay(400);
+
+    if(word_addr != 0){
+      printf("%u,%u\r\n", word_addr, word_addr_byte);
+    }
     #if TEST_DEMO
     BSP_LED_Toggle(LED2);
     HAL_Delay(500);
