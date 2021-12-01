@@ -1,9 +1,18 @@
+/*
+ * Copyright (C) 2021 Stefano Moioli <smxdev4@gmail.com>
+ * This software is provided 'as-is', without any express or implied warranty. In no event will the authors be held liable for any damages arising from the use of this software.
+ * Permission is granted to anyone to use this software for any purpose, including commercial applications, and to alter it and redistribute it freely, subject to the following restrictions:
+ *  1. The origin of this software must not be misrepresented; you must not claim that you wrote the original software. If you use this software in a product, an acknowledgment in the product documentation would be appreciated but is not required.
+ *  2. Altered source versions must be plainly marked as such, and must not be misrepresented as being the original software.
+ *  3. This notice may not be removed or altered from any source distribution.
+ */
 #include "main.h"
 #include "stdio.h"
 
 UART_HandleTypeDef UartHandle;
 I2C_HandleTypeDef I2cHandle;
 
+void SystemClock_Config(void);
 void I2C_Slave_Init(I2C_HandleTypeDef *i2ch);
 void UART_Init(UART_HandleTypeDef *uart);
 
@@ -141,6 +150,7 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c){
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c){
   
   if( HAL_I2C_GetError(hi2c) != HAL_I2C_ERROR_AF) {
+    printf("ERROR\n");
     return;
   }
   // if master NACK'd, the last write didn't go through
@@ -156,6 +166,15 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c){
       lastLog->is_write = 0;
     }
   }
+}
+
+static void hexdump(uint8_t *pData, unsigned length){
+  unsigned i;
+  for(i=0; i<length; i++){
+    printf("%02X", *(pData++));
+  }
+  putchar('\r');
+  putchar('\n');
 }
 
 /**
@@ -174,29 +193,28 @@ int main(void)
   BSP_LED_Init(LED2);
   BSP_LED_Off(LED2);
 
-  printf("ready!\r\n");
-
   for(int i=0; i<sizeof(ram); i++){
     ram[i] = i % 256;
   }
 
+  printf("ready!\r\n");
+
   while (1)
   {
-    //HAL_Delay(400);
-
     for(int i=0; i<LOG_MAXSIZE; i++){
       logEntry_t *ent =  &logBuffer[i];
       if(ent->count == 0 || !ent->completed){
         continue;
       }
-      printf("%c 0x%x %u\r\n", ((ent->is_write) ? 'w' : 'r'), ent->address, ent->count);
+      //printf("%c 0x%x %u\r\n", ((ent->is_write) ? 'w' : 'r'), ent->address, ent->count);
+      printf("%c 0x%x %2u     ", ((ent->is_write) ? 'w' : 'r'), ent->address, ent->count);
+      hexdump(&ram[ent->address], ent->count);
+
+      // "wipe" this entry
       ent->count = 0;
       ent->completed = 0;
     }
 
-    /*if(word_addr != 0){
-      printf("%u,%u\r\n", word_addr, word_addr_byte);
-    }*/
     #if TEST_DEMO
     BSP_LED_Toggle(LED2);
     HAL_Delay(500);
